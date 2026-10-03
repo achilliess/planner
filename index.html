@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#2563eb">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Planner</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1f2430;--mu:#6b7280;--ac:#2563eb;--bd:#e5e7eb}
+@media(prefers-color-scheme:dark){:root{--bg:#111318;--card:#1b1e26;--tx:#e8eaf0;--mu:#9aa1b0;--bd:#2c303b}}
+*{box-sizing:border-box}
+body{margin:0;font:15px system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+nav{display:flex;gap:4px;overflow-x:auto;padding:8px;background:var(--card);border-bottom:1px solid var(--bd);position:sticky;top:0;z-index:5}
+nav button{white-space:nowrap}
+main{max-width:960px;margin:0 auto;padding:12px}
+button,select,input,textarea{font:inherit;color:inherit;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:6px 10px}
+button{cursor:pointer}
+button.p,button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin:10px 0}
+.row{display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--bd);border-left-width:5px;border-radius:10px;margin:6px 0;background:var(--card)}
+.row input[type=checkbox]{width:20px;height:20px}
+.grow{flex:1;min-width:0;cursor:pointer}
+small,.mu{color:var(--mu)}
+.bar{height:8px;background:var(--bd);border-radius:6px;overflow:hidden;margin:6px 0}
+.bar i{display:block;height:100%;background:var(--ac)}
+.grid7{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.grid7 input{width:100%}
+.cell{min-height:84px;padding:4px;border:1px solid var(--bd);border-radius:8px;background:var(--card);font-size:12px;cursor:pointer;overflow:hidden}
+.cell.out{opacity:.45}.cell.now{outline:2px solid var(--ac)}
+.chip{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:4px;padding:1px 4px;margin-top:2px;color:#fff;font-size:11px}
+.done{text-decoration:line-through;opacity:.6}
+.mini{width:58px;padding:4px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:end}
+#modal{position:fixed;inset:0;background:#0007;display:flex;align-items:flex-end;justify-content:center;z-index:10}
+#modal[hidden]{display:none}
+.sheet{background:var(--bg);width:100%;max-width:640px;max-height:92vh;overflow:auto;border-radius:16px 16px 0 0;padding:14px}
+label{display:block;margin:8px 0 2px;font-size:13px;color:var(--mu)}
+label+input,label+select,label+textarea{width:100%}
+label.inl{display:inline-block;margin:2px 8px 2px 0;color:var(--tx);font-size:inherit}
+</style>
+</head>
+<body>
+<nav id="nav"></nav>
+<main id="main"></main>
+<div id="modal" hidden data-act="closemodal"></div>
+<script>
+'use strict';
+/* ---------- helpers ---------- */
+const KEY='planner.v1';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const uid=()=>Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-4);
+const pad=n=>String(n).padStart(2,'0');
+const ds=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const pd=s=>{const [y,m,d]=s.split('-').map(Number);return new Date(y,m-1,d)};
+const addDays=(s,n)=>{const d=pd(s);d.setDate(d.getDate()+n);return ds(d)};
+const today=()=>ds(new Date());
+const dow=s=>pd(s).getDay();
+const mondayOf=s=>addDays(s,-((dow(s)+6)%7));
+const fmtMin=m=>{m=Math.round(+m||0);const h=Math.floor(m/60),r=m%60;return h?(r?`${h}h ${r}m`:`${h}h`):`${r}m`};
+const fmtClock=ms=>{const t=Math.floor(ms/1000);return `${Math.floor(t/3600)}:${pad(Math.floor(t/60)%60)}:${pad(t%60)}`};
+const DOW=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const OPEN=['planned','inprogress'];
+const STATUS=[['planned','Planned'],['inprogress','In progress'],['completed','Completed'],['skipped','Skipped'],['cancelled','Cancelled']];
+const ACTIVITIES=['Grammar','Vocabulary','Anki','Listening','Reading','Writing','Speaking','Course','Exam practice','Review']; // edit freely
+const str=(v,m=300)=>typeof v==='string'?v.slice(0,m):'';
+const num=(v,d=0)=>(v!==''&&v!=null&&Number.isFinite(+v))?+v:d;
+const dt=v=>/^\d{4}-\d{2}-\d{2}$/.test(v)?v:'';
+const hex=v=>/^#[0-9a-f]{6}$/i.test(v)?v:'#2563eb';
+const oneOf=(v,a,d)=>a.includes(v)?v:d;
+const safeUrl=u=>/^https?:\/\//i.test(u||'')?u:'';
+
+/* ---------- state ---------- */
+const DEF=()=>({v:1,goals:[],projects:[],resources:[],tasks:[],templates:[],timer:null,
+  categories:[['German','🇩🇪','#e11d48'],['Work','💼','#2563eb'],['Exercise','🏃','#16a34a']].map(([name,icon,color])=>({id:uid(),name,icon,color})),
+  settings:{capacity:[4,8,8,8,8,8,4]}}); // index 0 = Sunday
+let S=(()=>{try{const o=JSON.parse(localStorage.getItem(KEY));if(o&&o.v===1)return Object.assign(DEF(),o)}catch(e){}return DEF()})();
+const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){alert('Could not save (storage full?)')}};
+const ui={tab:'today',cal:{mode:'month',date:today()},pid:null,q:'',range:30};
+const cat=id=>S.categories.find(c=>c.id===id);
+const proj=id=>S.projects.find(p=>p.id===id);
+const color=t=>cat(t.categoryId)?.color||proj(t.projectId)?.color||'#6b7280';
+
+/* ---------- task / occurrence logic ---------- */
+const isRec=t=>!!(t.recurrence&&t.recurrence.type&&t.recurrence.type!=='none');
+function occurs(t,d){
+  const r=t.recurrence||{};
+  if(!isRec(t))return t.date===d;
+  if(d<t.date||(r.until&&d>r.until))return false;
+  if(r.type==='daily')return true;
+  if(r.type==='weekly')return dow(d)===dow(t.date);
+  if(r.type==='days')return (r.days||[]).includes(dow(d));
+  return false;
+}
+const occState=(t,d)=>isRec(t)?((t.completions&&t.completions[d])||{}):t;
+const stat=(t,d)=>occState(t,d).status||'planned';
+function setOcc(t,d,p){
+  if(isRec(t)){t.completions=t.completions||{};t.completions[d]=Object.assign({},t.completions[d],p)}
+  else Object.assign(t,p);
+  save();
+}
+const dayItems=d=>S.tasks.filter(t=>occurs(t,d)&&stat(t,d)!=='moved').sort((a,b)=>(a.startTime||'99').localeCompare(b.startTime||'99'));
+const spent=(t,d)=>{const o=occState(t,d);return o.actualMin>0?o.actualMin:(o.status==='completed'?(+t.estMin||0):0)};
+const plannedMin=(d,withSkipped)=>dayItems(d).filter(t=>{const s=stat(t,d);return s!=='cancelled'&&(withSkipped||s!=='skipped')}).reduce((a,t)=>a+(+t.estMin||0),0);
+const d0=t=>isRec(t)?(occurs(t,today())?today():t.date):t.date;
+function prereqOk(t,d){const p=t.prereqId&&S.tasks.find(x=>x.id===t.prereqId);return !p||stat(p,isRec(p)?d:p.date)==='completed'}
+const sumOcc=(t,k)=>isRec(t)?Object.values(t.completions||{}).reduce((a,o)=>a+(+o[k]||0),0):(+t[k]||0);
+
+function progress(p){
+  const ts=S.tasks.filter(t=>t.projectId===p.id);
+  if(p.metric==='manual')return Math.min(100,+p.manual||0);
+  if(!p.metric||p.metric==='tasks'){
+    let tot=0,dn=0;const end=today();
+    for(const t of ts){
+      if(!isRec(t)){if(t.status==='cancelled')continue;tot++;if(t.status==='completed')dn++}
+      else{const last=t.recurrence.until||end;
+        for(let d=t.date,i=0;d<=last&&i<1000;d=addDays(d,1),i++)if(occurs(t,d)){const s=stat(t,d);if(s==='cancelled'||s==='moved')continue;tot++;if(s==='completed')dn++}}
+    }
+    return tot?dn/tot*100:0;
+  }
+  const goal=+p.target||0;if(!goal)return 0;
+  let v=0;
+  for(const t of ts){if(p.metric==='hours')v+=sumOcc(t,'actualMin')/60;else if(t.unit===p.metric)v+=sumOcc(t,'done')}
+  return Math.min(100,v/goal*100);
+}
+
+/* ---------- timer ---------- */
+const tel=()=>S.timer?S.timer.acc+(S.timer.started?Date.now()-S.timer.started:0):0;
+function startTimer(t,d){
+  if(!prereqOk(t,d)&&!confirm('This task has an unfinished prerequisite. Start anyway?'))return;
+  if(S.timer)return alert('Another timer is running. Finish it first.');
+  S.timer={taskId:t.id,date:d,acc:0,started:Date.now()};
+  if(stat(t,d)==='planned')setOcc(t,d,{status:'inprogress'});else save();
+}
+function finishTimer(){
+  const T=S.timer;if(!T)return;
+  const t=S.tasks.find(x=>x.id===T.taskId),min=Math.max(1,Math.round(tel()/60000));
+  S.timer=null;
+  if(t){(t.timeRecords=t.timeRecords||[]).push({date:T.date,min,at:Date.now()});
+    setOcc(t,T.date,{actualMin:(+occState(t,T.date).actualMin||0)+min,status:'completed'})}
+  else save();
+}
+
+/* ---------- scheduling ---------- */
+function freeDay(from,est){
+  for(let i=0;i<120;i++){const d=addDays(from,i),cap=S.settings.capacity[dow(d)]*60;if(cap>0&&plannedMin(d)+est<=cap)return d}
+  return from;
+}
+function moveTask(t,d,to){
+  if(isRec(t)){
+    setOcc(t,d,{status:'moved'});
+    const c=JSON.parse(JSON.stringify(t));
+    Object.assign(c,{id:uid(),recurrence:{type:'none',days:[],until:''},date:to,status:'planned',actualMin:0,done:0,sub:{},completions:{},timeRecords:[]});
+    S.tasks.push(c);
+  }else{t.date=to;if(t.status==='inprogress')t.status='planned'}
+  save();
+}
+function movAll(){
+  const d=today();
+  const L=S.tasks.filter(t=>!isRec(t)&&t.date<=d&&OPEN.includes(t.status)).sort((a,b)=>a.date.localeCompare(b.date));
+  if(!L.length)return alert('Nothing to move.');
+  if(!confirm(`Move ${L.length} unfinished task(s) to the next days with free capacity?`))return;
+  L.forEach(t=>moveTask(t,t.date,freeDay(addDays(d,1),+t.estMin||0)));
+}
+
+/* ---------- row ---------- */
+const da=(t,d)=>`data-id="${t.id}" data-d="${d}"`;
+function row(t,d){
+  const o=occState(t,d),st=o.status||'planned',T=S.timer,run=T&&T.taskId===t.id&&T.date===d;
+  const p=proj(t.projectId),c=cat(t.categoryId),fin=['completed','skipped','cancelled'].includes(st);
+  const meta=[ui.tab==='today'?'':d,t.startTime,t.estMin?fmtMin(t.estMin):'',t.activityType,c?c.icon+' '+c.name:'',p&&ui.tab!=='projects'?p.title:'',o.actualMin?'⏱ '+fmtMin(o.actualMin):'',isRec(t)?'🔁':'',(st==='skipped'||st==='cancelled')?st:''].filter(Boolean).map(esc).join(' · ');
+  const subs=(t.subtasks||[]).length?` · ☑ ${t.subtasks.filter(s=>o.sub&&o.sub[s.id]).length}/${t.subtasks.length}`:'';
+  return `<div class="row" style="border-left-color:${esc(color(t))}">
+  <input type="checkbox" data-chg="toggle" ${da(t,d)}${st==='completed'?' checked':''}>
+  <div class="grow" data-act="edit" ${da(t,d)}><div class="${fin?'done':''}">${t.priority==='high'?'❗ ':''}${esc(t.title)}${!fin&&!prereqOk(t,d)?' ⚠️':''}</div><small>${meta}${subs}</small></div>
+  ${t.target?`<input type="number" class="mini" min="0" title="${esc(t.unit||'done')} (target ${t.target})" value="${+o.done||0}" data-chg="done" ${da(t,d)}>/<small>${t.target}</small>`:''}
+  ${run?`<b data-timer>${fmtClock(tel())}</b>${T.started?'<button data-act="pause">⏸</button>':'<button data-act="resume">▶</button>'}<button data-act="finish">■</button>`:`<button data-act="start" ${da(t,d)} title="Start timer">▶</button>`}
+  <button data-act="move" ${da(t,d)} title="Move to tomorrow">→</button></div>`;
+}
+
+/* ---------- views ---------- */
+const V={};
+const TABS=[['today','Today'],['calendar','Calendar'],['projects','Projects'],['goals','Goals'],['tasks','Tasks'],['stats','Stats'],['resources','Resources'],['settings','Settings']];
+
+V.today=()=>{
+  const d=today(),its=dayItems(d);
+  const pl=plannedMin(d),sp=its.reduce((a,t)=>a+spent(t,d),0),cap=S.settings.capacity[dow(d)]*60;
+  const od=S.tasks.filter(t=>!isRec(t)&&t.date<d&&OPEN.includes(t.status)).sort((a,b)=>a.date.localeCompare(b.date));
+  const rv=S.tasks.filter(t=>(t.reviewDates||[]).includes(d));
+  const g={};its.forEach(t=>(g[t.projectId||'']=g[t.projectId||'']||[]).push(t));
+  let h=`<h2>Today — ${esc(pd(d).toLocaleDateString('en',{weekday:'long',month:'long',day:'numeric'}))}</h2>
+  <div class="card"><b>${fmtMin(sp)}</b> done of <b>${fmtMin(pl)}</b> planned <small>· capacity ${fmtMin(cap)}</small>
+  <div class="bar"><i style="width:${pl?Math.min(100,sp/pl*100):0}%"></i></div>
+  ${cap>0&&pl>cap?'<small>⚠️ Planned more than your capacity for today.</small>':''}
+  <div class="two" style="margin-top:8px"><button class="p" data-act="newtask">+ New task</button><button data-act="movall">Move unfinished → free days</button></div></div>`;
+  if(od.length)h+='<h3>Overdue</h3>'+od.map(t=>row(t,t.date)).join('');
+  for(const [pid,list] of Object.entries(g))
+    h+=`<h3>${esc(proj(pid)?.title||'No project')} <small>${fmtMin(list.reduce((a,t)=>a+(+t.estMin||0),0))}</small></h3>`+list.map(t=>row(t,d)).join('');
+  if(!its.length)h+='<p class="mu">Nothing scheduled for today.</p>';
+  if(rv.length)h+='<h3>Review today</h3>'+rv.map(t=>`<div class="row" style="border-left-color:${esc(color(t))}"><div class="grow" data-act="edit" ${da(t,t.date)}>🔁 ${esc(t.title)}</div></div>`).join('');
+  return h;
+};
+
+V.calendar=()=>{
+  const c=ui.cal,m=pd(c.date);
+  const title=c.mode==='month'?m.toLocaleDateString('en',{month:'long',year:'numeric'}):c.mode==='week'?'Week of '+mondayOf(c.date):m.toLocaleDateString('en',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+  let h=`<div><button data-act="cal" data-v="-1">‹</button> <button data-act="calnow">Today</button> <button data-act="cal" data-v="1">›</button> <b>${esc(title)}</b></div>
+  <div style="margin:8px 0">${['month','week','day'].map(k=>`<button class="${c.mode===k?'on':''}" data-act="calmode" data-v="${k}">${k}</button>`).join(' ')}</div>`;
+  if(c.mode==='day'){
+    const its=dayItems(c.date);
+    return h+`<div class="card"><small>Planned ${fmtMin(plannedMin(c.date))} · capacity ${fmtMin(S.settings.capacity[dow(c.date)]*60)}</small></div>`
+      +(its.map(t=>row(t,c.date)).join('')||'<p class="mu">Nothing scheduled.</p>')
+      +`<button class="p" data-act="newtask" data-d="${c.date}">+ Add task on this day</button>`;
+  }
+  const start=mondayOf(c.mode==='month'?c.date.slice(0,8)+'01':c.date),n=c.mode==='month'?42:7,lim=c.mode==='month'?3:50;
+  let cells=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(x=>`<small style="text-align:center">${x}</small>`).join('');
+  for(let i=0;i<n;i++){
+    const day=addDays(start,i),its=dayItems(day);
+    cells+=`<div class="cell${c.mode==='month'&&day.slice(0,7)!==c.date.slice(0,7)?' out':''}${day===today()?' now':''}" data-act="goday" data-d="${day}"><b>${+day.slice(8)}</b>`
+      +its.slice(0,lim).map(t=>`<span class="chip${stat(t,day)==='completed'?' done':''}" style="background:${esc(color(t))}">${esc((t.startTime?t.startTime+' ':'')+t.title)}</span>`).join('')
+      +(its.length>lim?`<small>+${its.length-lim}</small>`:'')+'</div>';
+  }
+  return h+`<div class="grid7">${cells}</div>`;
+};
+
+V.projects=()=>{
+  if(ui.pid){
+    const p=proj(ui.pid);
+    if(!p){ui.pid=null}
+    else{
+      const ts=S.tasks.filter(t=>t.projectId===p.id).sort((a,b)=>a.date.localeCompare(b.date)),pr=progress(p);
+      return `<button data-act="projback">← Projects</button><h2>${esc(p.title)}</h2><p>${esc(p.description)}</p>
+      <div class="card"><b>${Math.round(pr)}%</b> <small>(${esc(p.metric||'tasks')}${p.target?' / target '+p.target:''})</small><div class="bar"><i style="width:${pr}%"></i></div></div>
+      <div class="two"><button class="p" data-act="newtask">+ Task</button><button data-act="editproject" data-id="${p.id}">Edit project</button></div>
+      <h3>Milestones</h3>${(p.milestones||[]).map(m=>`<label class="inl"><input type="checkbox" data-chg="ms" data-id="${p.id}" data-m="${m.id}"${m.done?' checked':''}> ${esc(m.title)} <small>${esc(m.date||'')}</small></label><br>`).join('')||'<small class="mu">None</small>'}
+      <h3>Tasks</h3>${ts.map(t=>row(t,d0(t))).join('')||'<small class="mu">No tasks yet.</small>'}
+      <p><button data-act="exportproj" data-id="${p.id}">Export to share</button></p>`;
+    }
+  }
+  return `<div class="two"><h2>Projects</h2><div style="text-align:right"><button class="p" data-act="newproject">+ Project</button></div></div>`
+    +(S.projects.map(p=>{const pr=progress(p),g=S.goals.find(x=>x.id===p.goalId);
+      return `<div class="card" data-act="openproj" data-id="${p.id}" style="border-left:5px solid ${esc(p.color)};cursor:pointer"><b>${esc(p.title)}</b> <small>${g?'· '+esc(g.title):''}</small><div class="bar"><i style="width:${pr}%"></i></div><small>${Math.round(pr)}% · ${S.tasks.filter(t=>t.projectId===p.id).length} tasks</small></div>`}).join('')||'<p class="mu">No projects yet.</p>');
+};
+
+V.goals=()=>`<div class="two"><h2>Goals</h2><div style="text-align:right"><button class="p" data-act="newgoal">+ Goal</button></div></div>`
+  +(S.goals.map(g=>{
+    const ps=S.projects.filter(p=>p.goalId===g.id),avg=ps.length?ps.reduce((a,p)=>a+progress(p),0)/ps.length:0;
+    return `<div class="card"><b>${esc(g.title)}</b> <small>${g.deadline?'· due '+esc(g.deadline):''}</small><p>${esc(g.description)}</p>
+    <div class="bar"><i style="width:${avg}%"></i></div><small>${Math.round(avg)}%</small>
+    ${ps.map(p=>`<div data-act="openproj" data-id="${p.id}" style="cursor:pointer;margin-top:6px">▸ ${esc(p.title)} <small>${Math.round(progress(p))}%</small></div>`).join('')}
+    <p><button data-act="editgoal" data-id="${g.id}">Edit</button> <button data-act="newproject" data-goal="${g.id}">+ Project</button> <button data-act="exportgoal" data-id="${g.id}">Export</button></p></div>`}).join('')||'<p class="mu">No goals yet.</p>');
+
+function searchHTML(){
+  const q=ui.q.trim().toLowerCase(),has=(...a)=>!q||a.join(' ').toLowerCase().includes(q);
+  const ts=S.tasks.filter(t=>has(t.title,t.description,t.notes,t.chapter,t.activityType,proj(t.projectId)?.title,cat(t.categoryId)?.name,S.resources.find(r=>r.id===t.resourceId)?.title))
+    .sort((a,b)=>a.date.localeCompare(b.date)).slice(0,200);
+  let h=ts.map(t=>row(t,d0(t))).join('')||'<p class="mu">No tasks.</p>';
+  if(q){
+    h+=S.projects.filter(p=>has(p.title,p.description)).map(p=>`<div class="card" data-act="openproj" data-id="${p.id}">📁 ${esc(p.title)}</div>`).join('');
+    h+=S.goals.filter(x=>has(x.title,x.description)).map(x=>`<div class="card" data-act="editgoal" data-id="${x.id}">🎯 ${esc(x.title)}</div>`).join('');
+    h+=S.resources.filter(r=>has(r.title,r.notes,r.url)).map(r=>`<div class="card" data-act="editres" data-id="${r.id}">📚 ${esc(r.title)}</div>`).join('');
+  }
+  return h;
+}
+V.tasks=()=>`<div class="card"><input id="q" placeholder="Search tasks, projects, goals, notes, resources…" value="${esc(ui.q)}" style="width:100%">
+  <div class="two" style="margin-top:8px"><button class="p" data-act="newtask">+ New task</button>
+  <select data-chg="tpl"><option value="">New from template…</option>${S.templates.map(t=>`<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select></div></div>
+  <div id="results">${searchHTML()}</div>`;
+
+function streak(){
+  const did=x=>dayItems(x).some(t=>stat(t,x)==='completed');
+  let d=today(),n=0;if(!did(d))d=addDays(d,-1);
+  while(n<3650&&did(d)){n++;d=addDays(d,-1)}
+  return n;
+}
+V.stats=()=>{
+  const end=today();
+  let start=ui.range==='all'?(S.tasks.map(t=>t.date).sort()[0]||end):addDays(end,-ui.range+1);
+  if(start>end)start=end;
+  const lim=addDays(end,-730);if(start<lim)start=lim;
+  const C={},P={};let pl=0,sp=0,dn=0,sk=0;
+  for(let d=start;d<=end;d=addDays(d,1))for(const t of dayItems(d)){
+    const s=stat(t,d);if(s==='cancelled')continue;
+    const e=+t.estMin||0,x=spent(t,d);pl+=e;sp+=x;if(s==='completed')dn++;if(s==='skipped')sk++;
+    for(const [M,k] of [[C,t.categoryId||''],[P,t.projectId||'']]){const m=M[k]=M[k]||{pl:0,sp:0};m.pl+=e;m.sp+=x}
+  }
+  const wk=mondayOf(end);let wcap=0,wsp=0;
+  for(let i=0;i<7;i++){const d=addDays(wk,i);wcap+=S.settings.capacity[dow(d)]*60;if(d<=end)wsp+=dayItems(d).reduce((a,t)=>a+spent(t,d),0)}
+  const bars=(M,name)=>Object.entries(M).map(([k,m])=>`<div style="margin:6px 0">${esc(name(k))} <small>${fmtMin(m.sp)} / ${fmtMin(m.pl)}</small><div class="bar"><i style="width:${m.pl?Math.min(100,m.sp/m.pl*100):(m.sp?100:0)}%"></i></div></div>`).join('')||'<small class="mu">No data</small>';
+  return `<h2>Statistics</h2><div>${[[7,'7 days'],[30,'30 days'],[90,'90 days'],['all','All']].map(([r,l])=>`<button class="${ui.range===r?'on':''}" data-act="range" data-v="${r}">${l}</button>`).join(' ')}</div>
+  <div class="card"><b>🔥 Streak:</b> ${streak()} day(s)<br><b>Planned:</b> ${fmtMin(pl)} · <b>Done:</b> ${fmtMin(sp)} · <b>Completed tasks:</b> ${dn} · <b>Skipped:</b> ${sk}</div>
+  <div class="card"><b>This week</b>: ${fmtMin(wsp)} done of ${fmtMin(wcap)} weekly capacity<div class="bar"><i style="width:${wcap?Math.min(100,wsp/wcap*100):0}%"></i></div></div>
+  <div class="card"><b>By category</b> (done / planned)${bars(C,k=>cat(k)?cat(k).icon+' '+cat(k).name:'Uncategorised')}</div>
+  <div class="card"><b>By project</b> (done / planned)${bars(P,k=>proj(k)?.title||'No project')}</div>`;
+};
+
+V.resources=()=>`<div class="two"><h2>Resources</h2><div style="text-align:right"><button class="p" data-act="newres">+ Resource</button></div></div>`
+  +(S.resources.map(r=>`<div class="card"><b>${esc(r.title)}</b> <small>${esc(r.type)}</small> ${safeUrl(r.url)?`<a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">open ↗</a>`:''}<p>${esc(r.notes)}</p><small>${S.tasks.filter(t=>t.resourceId===r.id).length} tasks</small> <button data-act="editres" data-id="${r.id}">Edit</button></div>`).join('')||'<p class="mu">No resources yet.</p>');
+
+V.settings=()=>`<h2>Settings</h2>
+  <div class="card"><b>Daily capacity (hours)</b><div class="grid7">${[1,2,3,4,5,6,0].map(i=>`<div><small>${DOW[i]}</small><input type="number" min="0" max="24" step="0.5" value="${S.settings.capacity[i]}" data-chg="cap" data-i="${i}"></div>`).join('')}</div></div>
+  <div class="card"><b>Categories</b>${S.categories.map(c=>`<div class="row" style="border-left-color:${esc(c.color)}"><div class="grow" data-act="editcat" data-id="${c.id}">${esc(c.icon)} ${esc(c.name)}</div></div>`).join('')}<button data-act="newcat">+ Category</button></div>
+  <div class="card"><b>Templates</b>${S.templates.map(t=>`<div class="row"><div class="grow">${esc(t.name)}</div><button data-act="deltpl" data-id="${t.id}">✕</button></div>`).join('')||'<br><small class="mu">None yet. Use “Save + make template” in the task editor.</small>'}</div>
+  <div class="card"><b>Data</b><p class="mu">Everything is stored on this device only.</p>
+  <button data-act="backup">Backup (JSON)</button> <button data-act="csv">Export tasks (CSV)</button>
+  <p><label class="inl">Import a shared goal/project: <input type="file" accept=".json" data-chg="import"></label></p>
+  <p><label class="inl">Restore a full backup (replaces everything): <input type="file" accept=".json" data-chg="restore"></label></p></div>
+  <div class="card"><b>Reminders</b><p><button data-act="notif">Enable reminders</button> <small class="mu">${'Notification' in window?esc(Notification.permission):'not supported'} · work while the app is open</small></p></div>
+  <div class="card"><button data-act="reset">Delete all data</button></div>`;
+
+function render(){
+  $('#nav').innerHTML=TABS.map(([k,l])=>`<button class="${ui.tab===k?'on':''}" data-act="tab" data-tab="${k}">${l}</button>`).join('');
+  $('#main').innerHTML=V[ui.tab]();
+}
+
+/* ---------- forms ---------- */
+const f=(l,i)=>`<div><label>${l}</label>${i}</div>`;
+const inp=(n,v,x='')=>`<input name="${n}" value="${esc(v)}" ${x}>`;
+const sel=(n,o,v)=>`<select name="${n}">${o.map(([a,b])=>`<option value="${esc(a)}"${String(a)===String(v)?' selected':''}>${esc(b)}</option>`).join('')}</select>`;
+const area=(n,v,r=3)=>`<textarea name="${n}" rows="${r}">${esc(v)}</textarea>`;
+const btns=del=>`<p><button class="p">Save</button> <button type="button" data-act="closemodal2">Cancel</button>${del?` <button type="button" data-act="del" ${del}>Delete</button>`:''}</p>`;
+function openModal(h){const m=$('#modal');m.innerHTML=`<div class="sheet">${h}</div>`;m.hidden=false}
+function closeModal(){const m=$('#modal');m.hidden=true;m.innerHTML=''}
+
+function blank(){return {title:'',description:'',projectId:ui.tab==='projects'?ui.pid||'':'',categoryId:'',date:today(),startTime:'',estMin:60,priority:'medium',recurrence:{type:'none',days:[],until:''},deadline:'',reminderMin:'',target:0,unit:'',activityType:'',resourceId:'',chapter:'',prereqId:'',reviewDates:[],notes:'',subtasks:[]}}
+function openTask(id,d,tpl){
+  const ex=id&&S.tasks.find(x=>x.id===id);
+  const t=ex||Object.assign(blank(),tpl||{});
+  d=d||t.date;
+  const o=ex?occState(t,d):{},r=t.recurrence||{type:'none',days:[]};
+  const none=[['','—']];
+  openModal(`<form data-form="task" data-id="${ex?t.id:''}" data-d="${d}">
+  <h3>${ex?'Edit task':'New task'}</h3>
+  ${f('Title',inp('title',t.title,'required maxlength="200"'))}
+  <div class="two">${f('Date',inp('date',t.date,'type="date" required'))}${f('Start time',inp('startTime',t.startTime,'type="time"'))}</div>
+  <div class="two">${f('Estimated minutes',inp('estMin',t.estMin,'type="number" min="0"'))}${f('Actual minutes'+(isRec(t)?' ('+d+')':''),inp('actualMin',o.actualMin||'','type="number" min="0"'))}</div>
+  <div class="two">${f('Status'+(isRec(t)?' on '+d:''),sel('status',STATUS,o.status||'planned'))}${f('Priority',sel('priority',[['low','Low'],['medium','Medium'],['high','High']],t.priority))}</div>
+  <div class="two">${f('Project',sel('projectId',[...none,...S.projects.map(p=>[p.id,p.title])],t.projectId))}${f('Category',sel('categoryId',[...none,...S.categories.map(c=>[c.id,c.icon+' '+c.name])],t.categoryId))}</div>
+  <div class="two">${f('Repeat',sel('rtype',[['none','Does not repeat'],['daily','Every day'],['weekly','Every week (same weekday)'],['days','Selected weekdays']],r.type||'none'))}${f('Repeat until',inp('until',r.until,'type="date"'))}</div>
+  <div>${[1,2,3,4,5,6,0].map(i=>`<label class="inl"><input type="checkbox" name="days" value="${i}"${(r.days||[]).includes(i)?' checked':''}> ${DOW[i]}</label>`).join('')}</div>
+  <div class="two">${f('Deadline',inp('deadline',t.deadline,'type="date"'))}${f('Reminder (needs start time)',sel('reminderMin',[['','None'],['0','At start'],['5','5 min before'],['10','10 min before'],['30','30 min before'],['60','1 hour before']],String(t.reminderMin??'')))}</div>
+  <div class="two">${f('Activity type',sel('activityType',[...none,...ACTIVITIES.map(a=>[a,a])],t.activityType))}${f('Resource',sel('resourceId',[...none,...S.resources.map(x=>[x.id,x.title])],t.resourceId))}</div>
+  ${f('Chapter / lesson',inp('chapter',t.chapter,'maxlength="100"'))}
+  <div class="two">${f('Target (e.g. 40)',inp('target',t.target||'','type="number" min="0"'))}${f('Unit (words, pages, minutes…)',inp('unit',t.unit,'maxlength="20"'))}</div>
+  ${f('Progress so far'+(isRec(t)?' ('+d+')':''),inp('done',o.done||'','type="number" min="0"'))}
+  ${f('Prerequisite task',sel('prereqId',[...none,...S.tasks.filter(x=>x.id!==t.id).slice(0,500).map(x=>[x.id,x.title])],t.prereqId))}
+  ${f('Review dates (YYYY-MM-DD, comma separated)',inp('reviewDates',(t.reviewDates||[]).join(', ')))}
+  <button type="button" data-act="revdefault">Suggest +3 / +7 / +21 days</button>
+  ${f('Description',area('description',t.description))}
+  ${f('Notes / links',area('notes',t.notes))}
+  ${ex&&(t.subtasks||[]).length?`<label>Subtask checklist</label>`+t.subtasks.map(s=>`<label class="inl"><input type="checkbox" data-chg="sub" data-id="${t.id}" data-d="${d}" data-s="${s.id}"${o.sub&&o.sub[s.id]?' checked':''}> ${esc(s.title)}</label><br>`).join(''):''}
+  ${f('Subtasks (one per line)',area('subtasks',(t.subtasks||[]).map(s=>s.title).join('\n'),4))}
+  <p><button class="p">Save</button> <button type="button" data-act="closemodal2">Cancel</button> <button type="button" data-act="mktpl">Save + make template</button>${ex?` <button type="button" data-act="del" data-kind="tasks" data-id="${t.id}">Delete</button>`:''}</p>
+  </form>`);
+}
+const pickTpl=t=>{const {id,completions,timeRecords,sub,status,actualMin,done,date,...rest}=t;return JSON.parse(JSON.stringify(rest))};
+
+function saveTask(form,fd){
+  const g=k=>(fd.get(k)||'').toString().trim(),id=form.dataset.id,d=form.dataset.d;
+  let t=id&&S.tasks.find(x=>x.id===id);
+  if(!t){t={id:uid(),completions:{},timeRecords:[],sub:{}};S.tasks.push(t)}
+  const date=g('date')||today(),rtype=g('rtype');let days=fd.getAll('days').map(Number);
+  if(rtype==='days'&&!days.length)days=[dow(date)];
+  const old=t.subtasks||[];
+  Object.assign(t,{title:g('title').slice(0,200),description:g('description'),projectId:g('projectId'),categoryId:g('categoryId'),date,startTime:g('startTime'),
+    estMin:Math.max(0,+g('estMin')||0),priority:g('priority'),recurrence:{type:rtype,days,until:g('until')},deadline:g('deadline'),reminderMin:g('reminderMin'),
+    target:Math.max(0,+g('target')||0),unit:g('unit').slice(0,20),activityType:g('activityType'),resourceId:g('resourceId'),chapter:g('chapter').slice(0,100),
+    prereqId:g('prereqId'),reviewDates:g('reviewDates').split(/[\s,]+/).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x)),notes:g('notes'),
+    subtasks:g('subtasks').split('\n').map(x=>x.trim()).filter(Boolean).slice(0,100).map(x=>old.find(s=>s.title===x)||{id:uid(),title:x.slice(0,200)})});
+  setOcc(t,id?d:date,{status:g('status')||'planned',actualMin:Math.max(0,+g('actualMin')||0),done:Math.max(0,+g('done')||0)});
+  if(form.dataset.tpl&&t.title)S.templates.push({id:uid(),name:t.title,task:pickTpl(t)});
+  save();
+}
+
+function openGoal(id){const g=S.goals.find(x=>x.id===id)||{};
+  openModal(`<form data-form="goal" data-id="${id||''}"><h3>${id?'Edit':'New'} goal</h3>${f('Title',inp('title',g.title,'required maxlength="200"'))}${f('Description',area('description',g.description))}${f('Deadline',inp('deadline',g.deadline,'type="date"'))}${btns(id&&`data-kind="goals" data-id="${id}"`)}</form>`)}
+function openProject(id,goalId){const p=S.projects.find(x=>x.id===id)||{color:'#2563eb',metric:'tasks',goalId:goalId||''};
+  openModal(`<form data-form="project" data-id="${id||''}"><h3>${id?'Edit':'New'} project</h3>${f('Title',inp('title',p.title,'required maxlength="200"'))}${f('Description',area('description',p.description))}
+  ${f('Goal',sel('goalId',[['','— none —'],...S.goals.map(g=>[g.id,g.title])],p.goalId))}
+  <div class="two">${f('Colour',inp('color',p.color,'type="color"'))}${f('Progress measured by',sel('metric',[['tasks','Tasks completed'],['hours','Hours spent'],['chapters','Chapters (task unit “chapters”)'],['pages','Pages (task unit “pages”)'],['manual','Manual %']],p.metric))}</div>
+  <div class="two">${f('Target (hours / chapters / pages)',inp('target',p.target||'','type="number" min="0"'))}${f('Manual %',inp('manual',p.manual||'','type="number" min="0" max="100"'))}</div>
+  ${f('Milestones (Title | YYYY-MM-DD, one per line)',area('milestones',(p.milestones||[]).map(m=>m.title+(m.date?' | '+m.date:'')).join('\n'),4))}
+  ${btns(id&&`data-kind="projects" data-id="${id}"`)}</form>`)}
+function openCat(id){const c=S.categories.find(x=>x.id===id)||{color:'#2563eb',icon:'📌'};
+  openModal(`<form data-form="cat" data-id="${id||''}"><h3>Category</h3>${f('Name',inp('name',c.name,'required maxlength="40"'))}<div class="two">${f('Icon (emoji)',inp('icon',c.icon,'maxlength="4"'))}${f('Colour',inp('color',c.color,'type="color"'))}</div>${btns(id&&`data-kind="categories" data-id="${id}"`)}</form>`)}
+function openRes(id){const r=S.resources.find(x=>x.id===id)||{type:'Course'};
+  openModal(`<form data-form="res" data-id="${id||''}"><h3>Resource</h3>${f('Title',inp('title',r.title,'required maxlength="200"'))}${f('Type',sel('type',['Course','Book','Website','Video','App','Other'].map(x=>[x,x]),r.type))}${f('URL',inp('url',r.url))}${f('Notes',area('notes',r.notes))}${btns(id&&`data-kind="resources" data-id="${id}"`)}</form>`)}
+
+function upsert(arr,id,obj){let o=id&&arr.find(x=>x.id===id);if(!o){o={id:uid()};arr.push(o)}Object.assign(o,obj);save();return o}
+function submit(form){
+  const fd=new FormData(form),g=k=>(fd.get(k)||'').toString().trim(),id=form.dataset.id;
+  switch(form.dataset.form){
+    case 'task':saveTask(form,fd);break;
+    case 'goal':upsert(S.goals,id,{title:g('title').slice(0,200),description:g('description'),deadline:g('deadline')});break;
+    case 'project':{
+      const old=(id&&proj(id)?.milestones)||[];
+      upsert(S.projects,id,{title:g('title').slice(0,200),description:g('description'),goalId:g('goalId'),color:hex(g('color')),metric:g('metric'),target:+g('target')||0,manual:+g('manual')||0,
+        milestones:g('milestones').split('\n').map(l=>l.trim()).filter(Boolean).slice(0,100).map(l=>{const [ti,dd]=l.split('|').map(x=>x.trim());const o=old.find(m=>m.title===ti);return {id:o?o.id:uid(),title:ti,date:dt(dd||''),done:!!(o&&o.done)}})});
+      break}
+    case 'cat':upsert(S.categories,id,{name:g('name').slice(0,40),icon:g('icon').slice(0,4)||'📌',color:hex(g('color'))});break;
+    case 'res':{let u=g('url');if(u&&!/^[a-z]+:/i.test(u))u='https://'+u;upsert(S.resources,id,{title:g('title').slice(0,200),type:g('type'),url:safeUrl(u),notes:g('notes')});break}
+  }
+  closeModal();render();
+}
+
+/* ---------- import / export ---------- */
+function dl(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+function bundle(goalIds,projIds){
+  const ps=S.projects.filter(p=>projIds.includes(p.id)),gs=S.goals.filter(x=>goalIds.includes(x.id));
+  const ts=S.tasks.filter(t=>projIds.includes(t.projectId));
+  const clean=t=>({...t,status:'planned',actualMin:0,done:0,sub:{},completions:{},timeRecords:[]});
+  return {format:'planner-export',version:1,exportedAt:new Date().toISOString(),goals:gs,
+    projects:ps.map(p=>({...p,milestones:(p.milestones||[]).map(m=>({...m,done:false}))})),
+    categories:S.categories.filter(c=>ts.some(t=>t.categoryId===c.id)),resources:S.resources.filter(r=>ts.some(t=>t.resourceId===r.id)),tasks:ts.map(clean)};
+}
+function importData(txt){
+  let o;try{o=JSON.parse(txt)}catch(e){return alert('That file is not valid JSON.')}
+  if(!o||o.format!=='planner-export'||o.version!==1)return alert('Unrecognised file format.');
+  const A=k=>Array.isArray(o[k])?o[k].filter(x=>x&&typeof x==='object'&&typeof x.id==='string').slice(0,5000):[];
+  const goals=A('goals'),projects=A('projects'),cats=A('categories'),res=A('resources'),tasks=A('tasks');
+  const ids=new Set([...goals,...projects,...cats,...res,...tasks].map(x=>x.id)),M={};
+  const nid=old=>ids.has(old)?(M[old]=M[old]||uid()):'';
+  let shift=0;const dated=tasks.map(t=>dt(t.date)).filter(Boolean).sort();
+  if(dated.length){
+    const want=prompt('Start date for the imported plan (YYYY-MM-DD). Leave empty to keep the original dates:','');
+    if(want===null)return;
+    if(dt(want.trim()))shift=Math.round((pd(want.trim())-pd(dated[0]))/864e5);
+  }
+  const sh=v=>(v&&shift)?addDays(v,shift):v;
+  cats.forEach(c=>{
+    const name=str(c.name,40);if(!name)return;
+    const ex=S.categories.find(x=>x.name.toLowerCase()===name.toLowerCase());
+    if(ex)M[c.id]=ex.id;else{const nc={id:uid(),name,icon:str(c.icon,4)||'📌',color:hex(c.color)};S.categories.push(nc);M[c.id]=nc.id}
+  });
+  goals.forEach(x=>S.goals.push({id:nid(x.id),title:str(x.title,200)||'Untitled goal',description:str(x.description,2000),deadline:sh(dt(x.deadline))}));
+  projects.forEach(p=>S.projects.push({id:nid(p.id),goalId:nid(p.goalId),title:str(p.title,200)||'Untitled project',description:str(p.description,2000),color:hex(p.color),
+    metric:oneOf(p.metric,['tasks','hours','chapters','pages','manual'],'tasks'),target:num(p.target),manual:num(p.manual),
+    milestones:(Array.isArray(p.milestones)?p.milestones:[]).slice(0,100).map(m=>({id:uid(),title:str(m&&m.title,200),date:sh(dt(m&&m.date)),done:false})).filter(m=>m.title)}));
+  res.forEach(r=>S.resources.push({id:nid(r.id),title:str(r.title,200)||'Resource',type:str(r.type,30),url:safeUrl(str(r.url,500)),notes:str(r.notes,2000)}));
+  tasks.forEach(t=>{const r=t.recurrence||{};
+    S.tasks.push({id:nid(t.id),title:str(t.title,200)||'Untitled',description:str(t.description,5000),projectId:nid(t.projectId),categoryId:nid(t.categoryId),
+      date:sh(dt(t.date))||today(),startTime:/^\d{2}:\d{2}$/.test(t.startTime)?t.startTime:'',estMin:num(t.estMin),priority:oneOf(t.priority,['low','medium','high'],'medium'),
+      status:'planned',actualMin:0,done:0,sub:{},completions:{},timeRecords:[],
+      recurrence:{type:oneOf(r.type,['none','daily','weekly','days'],'none'),days:(Array.isArray(r.days)?r.days:[]).map(Number).filter(x=>x>=0&&x<=6),until:sh(dt(r.until))},
+      deadline:sh(dt(t.deadline)),reminderMin:(t.reminderMin===''||t.reminderMin==null)?'':String(num(t.reminderMin)),target:num(t.target),unit:str(t.unit,20),
+      activityType:str(t.activityType,30),resourceId:nid(t.resourceId),chapter:str(t.chapter,100),prereqId:nid(t.prereqId),
+      reviewDates:(Array.isArray(t.reviewDates)?t.reviewDates:[]).map(dt).filter(Boolean).map(sh).slice(0,50),notes:str(t.notes,5000),
+      subtasks:(Array.isArray(t.subtasks)?t.subtasks:[]).slice(0,200).map(x=>({id:uid(),title:str(x&&x.title,200)})).filter(x=>x.title)});
+  });
+  save();render();
+  alert(`Imported ${goals.length} goal(s), ${projects.length} project(s), ${tasks.length} task(s).`);
+}
+function restore(txt){
+  try{
+    const o=JSON.parse(txt);
+    if(o.format!=='planner-backup'||o.version!==1||!o.state||!Array.isArray(o.state.tasks))throw new Error('bad');
+    if(!confirm('Replace ALL current data with this backup?'))return;
+    S=Object.assign(DEF(),o.state);save();render();
+  }catch(e){alert('That is not a valid backup file.')}
+}
+function csv(){
+  const q=v=>{v=String(v??'');if(/^[=+\-@]/.test(v))v="'"+v;return '"'+v.replace(/"/g,'""')+'"'};
+  const head=['title','date','start','est_min','actual_min','status','priority','project','category','repeat','deadline','activity','notes'];
+  const rows=S.tasks.map(t=>[t.title,t.date,t.startTime,t.estMin,occState(t,t.date).actualMin||0,stat(t,t.date),t.priority,proj(t.projectId)?.title,cat(t.categoryId)?.name,t.recurrence?.type,t.deadline,t.activityType,t.notes]);
+  dl('tasks.csv',[head,...rows].map(r=>r.map(q).join(',')).join('\n'),'text/csv');
+}
+function readFile(el,fn){
+  const file=el.files[0];el.value='';if(!file)return;
+  if(file.size>5e6)return alert('File too large (max 5 MB).');
+  const r=new FileReader();r.onload=()=>fn(String(r.result));r.readAsText(file);
+}
+
+/* ---------- events ---------- */
+function act(a,D,el,e){
+  const t=D.id&&S.tasks.find(x=>x.id===D.id),d=D.d;
+  switch(a){
+    case 'tab':ui.tab=D.tab;ui.pid=null;break;
+    case 'edit':openTask(D.id,d);return;
+    case 'newtask':openTask(null,null,D.d?{date:D.d}:null);return;
+    case 'start':if(t)startTimer(t,d);break;
+    case 'pause':if(S.timer){S.timer.acc=tel();S.timer.started=null;save()}break;
+    case 'resume':if(S.timer){S.timer.started=Date.now();save()}break;
+    case 'finish':finishTimer();break;
+    case 'move':if(t)moveTask(t,d,addDays(today(),1));break;
+    case 'movall':movAll();break;
+    case 'cal':{const c=ui.cal,v=+D.v;
+      if(c.mode==='month'){const x=pd(c.date);x.setDate(1);x.setMonth(x.getMonth()+v);c.date=ds(x)}
+      else c.date=addDays(c.date,v*(c.mode==='week'?7:1));break}
+    case 'calmode':ui.cal.mode=D.v;break;
+    case 'calnow':ui.cal.date=today();break;
+    case 'goday':ui.cal.mode='day';ui.cal.date=d;break;
+    case 'openproj':ui.pid=D.id;ui.tab='projects';break;
+    case 'projback':ui.pid=null;break;
+    case 'newgoal':openGoal();return;
+    case 'editgoal':openGoal(D.id);return;
+    case 'newproject':openProject(null,D.goal);return;
+    case 'editproject':openProject(D.id);return;
+    case 'newcat':openCat();return;
+    case 'editcat':openCat(D.id);return;
+    case 'newres':openRes();return;
+    case 'editres':openRes(D.id);return;
+    case 'del':{
+      if(!confirm('Delete this item?'))return;
+      const k=D.kind,id=D.id;
+      if(k==='goals')S.projects.forEach(p=>{if(p.goalId===id)p.goalId=''});
+      if(k==='projects'){S.tasks.forEach(x=>{if(x.projectId===id)x.projectId=''});ui.pid=null}
+      if(k==='categories')S.tasks.forEach(x=>{if(x.categoryId===id)x.categoryId=''});
+      if(k==='resources')S.tasks.forEach(x=>{if(x.resourceId===id)x.resourceId=''});
+      if(k==='tasks'){if(S.timer&&S.timer.taskId===id)S.timer=null;S.tasks.forEach(x=>{if(x.prereqId===id)x.prereqId=''})}
+      S[k]=S[k].filter(x=>x.id!==id);save();closeModal();break}
+    case 'closemodal':if(e.target!==el)return;closeModal();return;
+    case 'closemodal2':closeModal();return;
+    case 'mktpl':el.form.dataset.tpl='1';el.form.requestSubmit();return;
+    case 'revdefault':{const fm=el.form.elements,base=fm.date.value||today();fm.reviewDates.value=[3,7,21].map(k=>addDays(base,k)).join(', ');return}
+    case 'exportgoal':dl('goal.json',JSON.stringify(bundle([D.id],S.projects.filter(p=>p.goalId===D.id).map(p=>p.id)),null,2),'application/json');return;
+    case 'exportproj':dl('project.json',JSON.stringify(bundle([],[D.id]),null,2),'application/json');return;
+    case 'backup':dl(`planner-backup-${today()}.json`,JSON.stringify({format:'planner-backup',version:1,state:S}),'application/json');return;
+    case 'csv':csv();return;
+    case 'notif':if('Notification' in window)Notification.requestPermission().then(render);return;
+    case 'reset':if(!confirm('Delete ALL data on this device? This cannot be undone.'))return;S=DEF();save();ui.pid=null;break;
+    case 'deltpl':S.templates=S.templates.filter(x=>x.id!==D.id);save();break;
+    case 'range':ui.range=D.v==='all'?'all':+D.v;break;
+  }
+  render();
+}
+function chg(a,D,el){
+  const t=D.id&&S.tasks.find(x=>x.id===D.id);
+  switch(a){
+    case 'toggle':{
+      if(!t)return;
+      if(stat(t,D.d)==='completed')setOcc(t,D.d,{status:'planned'});
+      else{
+        if(!prereqOk(t,D.d)&&!confirm('This task has an unfinished prerequisite. Mark completed anyway?')){render();return}
+        setOcc(t,D.d,{status:'completed'});
+      }
+      break}
+    case 'done':if(t)setOcc(t,D.d,{done:+el.value||0});break;
+    case 'sub':{if(!t)return;const s={...(occState(t,D.d).sub||{})};s[D.s]=el.checked;setOcc(t,D.d,{sub:s});return}
+    case 'ms':{const p=proj(D.id),m=p&&p.milestones.find(x=>x.id===D.m);if(m){m.done=el.checked;save()}break}
+    case 'cap':S.settings.capacity[+D.i]=Math.max(0,+el.value||0);save();return;
+    case 'tpl':{const tp=S.templates.find(x=>x.id===el.value);el.value='';if(tp)openTask(null,null,JSON.parse(JSON.stringify(tp.task)));return}
+    case 'import':readFile(el,importData);return;
+    case 'restore':readFile(el,restore);return;
+  }
+  render();
+}
+document.addEventListener('click',e=>{const el=e.target.closest('[data-act]');if(el)act(el.dataset.act,el.dataset,el,e)});
+document.addEventListener('change',e=>{const el=e.target.closest('[data-chg]');if(el)chg(el.dataset.chg,el.dataset,el)});
+document.addEventListener('submit',e=>{const fm=e.target.closest('[data-form]');if(fm){e.preventDefault();submit(fm)}});
+document.addEventListener('input',e=>{if(e.target.id==='q'){ui.q=e.target.value;$('#results').innerHTML=searchHTML()}});
+
+/* ---------- timer display + reminders ---------- */
+setInterval(()=>document.querySelectorAll('[data-timer]').forEach(el=>el.textContent=fmtClock(tel())),1000);
+const fired=new Set();
+setInterval(()=>{
+  if(!('Notification' in window)||Notification.permission!=='granted')return;
+  const d=today(),now=Date.now();
+  for(const t of dayItems(d)){
+    const rm=t.reminderMin;
+    if(!t.startTime||rm===''||rm==null||!OPEN.includes(stat(t,d)))continue;
+    const at=new Date(`${d}T${t.startTime}`).getTime()-Number(rm)*60000,k=t.id+d;
+    if(now>=at&&now<at+120000&&!fired.has(k)){fired.add(k);navigator.serviceWorker&&navigator.serviceWorker.ready.then(r=>r.showNotification(t.title,{body:'Starts at '+t.startTime}))}
+  }
+},30000);
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+if(navigator.storage&&navigator.storage.persist)navigator.storage.persist(); // ask Chrome not to evict your data
+
+render();
+</script>
+</body>
+</html>
